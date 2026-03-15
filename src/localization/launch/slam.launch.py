@@ -1,6 +1,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
+
 def generate_launch_description():
 
     slam_node = Node(
@@ -9,7 +10,7 @@ def generate_launch_description():
         name='slam_toolbox',
         output='screen',
         parameters=[{
-            'use_sim_time': False,
+            'use_sim_time': True,
             'odom_frame': 'odom',
             'base_frame': 'base_link',
             'map_frame': 'map',
@@ -24,6 +25,19 @@ def generate_launch_description():
         }]
     )
 
+    lifecycle_manager = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager_slam',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'autostart': True,
+            'node_names': ['slam_toolbox']
+        }]
+    )
+
     return LaunchDescription([
-        slam_node
+        slam_node,
+        lifecycle_manager
     ])

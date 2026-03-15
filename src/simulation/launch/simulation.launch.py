@@ -9,11 +9,11 @@ def generate_launch_description():
 
     pkg_desc = get_package_share_directory('description')
     xacro_file = os.path.join(pkg_desc, 'urdf', 'robot.urdf.xacro')
+    
+    pkg_sim = get_package_share_directory('simulation')
 
     world_file = os.path.join(
-        os.getcwd(),
-        'src',
-        'simulation',
+        pkg_sim,
         'worlds',
         'mercury.sdf'
     )
