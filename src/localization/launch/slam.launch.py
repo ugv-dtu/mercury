@@ -17,27 +17,17 @@ def generate_launch_description():
             'scan_topic': '/scan',
             'mode': 'mapping',
             'resolution': 0.05,
-            'max_laser_range': 12.0,
-            'minimum_travel_distance': 0.1,
-            'minimum_travel_heading': 0.1,
+            'max_laser_range': 10.0,
+            'minimum_travel_distance': 0.02,
+            'minimum_travel_heading': 0.02,
+            'scan_queue_size': 20,
+            'throttle_scans': 1,
+            'map_update_interval': 0.3,
             'transform_timeout': 0.2,
-            'tf_buffer_duration': 30.0,
-        }]
-    )
-
-    lifecycle_manager = Node(
-        package='nav2_lifecycle_manager',
-        executable='lifecycle_manager',
-        name='lifecycle_manager_slam',
-        output='screen',
-        parameters=[{
-            'use_sim_time': True,
-            'autostart': True,
-            'node_names': ['slam_toolbox']
+            'tf_buffer_duration': 30.0
         }]
     )
 
     return LaunchDescription([
-        slam_node,
-        lifecycle_manager
+        slam_node
     ])
