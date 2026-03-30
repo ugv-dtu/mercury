@@ -107,15 +107,37 @@
     <origin xyz="0.11 0 0.15"/>
   </joint>
 
-  <link name="camera_link">
-    <origin xyz="0.15 0 0.12" rpy="0 0 0"/>
-  </link>
+  <!-- ================= PAN LINK ================= -->
+<link name="pan_link">
+  <visual>
+    <geometry>
+      <cylinder radius="0.05" length="0.02"/>
+    </geometry>
+    <material name="gray">
+      <color rgba="0.6 0.6 0.6 1.0"/>
+    </material>
+  </visual>
+</link>
 
-  <joint name="camera_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="camera_link"/>
-    <origin xyz="0.15 0 0.12"/>
-  </joint>
+<joint name="pan_joint" type="continuous">
+  <parent link="base_link"/>
+  <child link="pan_link"/>
+  <origin xyz="0.15 0 0.12"/>
+  <axis xyz="0 0 1"/>
+</joint>
+
+<link name="camera_link"/>
+
+  <!-- ================= TILT JOINT ================= -->
+<joint name="tilt_joint" type="revolute">
+  <parent link="pan_link"/>
+  <child link="camera_link"/>
+  <origin xyz="0 0 0.05"/>
+  <axis xyz="0 1 0"/>
+  <limit lower="-1.57" upper="1.57" effort="1" velocity="1"/>
+</joint>
+
+  
 
   <xacro:macro name="wheel" params="name x y">
 
