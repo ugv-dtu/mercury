@@ -105,7 +105,8 @@
           <material>
             <diffuse>1 1 1 1</diffuse>
             <specular>0 0 0 1</specular>
-            <pbr><metal><albedo_map>photo1.jpg</albedo_map></metal></pbr>
+            <emissive>1 1 1 1</emissive>
+            <pbr><metal><albedo_map>photo1.jpg</albedo_map><emissive_map>photo1.jpg</emissive_map></metal></pbr>
           </material>
           <cast_shadows>false</cast_shadows>
         </visual>
@@ -125,7 +126,8 @@
           <material>
             <diffuse>1 1 1 1</diffuse>
             <specular>0 0 0 1</specular>
-            <pbr><metal><albedo_map>photo2.jpg</albedo_map></metal></pbr>
+            <emissive>1 1 1 1</emissive>
+            <pbr><metal><albedo_map>photo2.jpg</albedo_map><emissive_map>photo2.jpg</emissive_map></metal></pbr>
           </material>
           <cast_shadows>false</cast_shadows>
         </visual>
@@ -145,7 +147,8 @@
           <material>
             <diffuse>1 1 1 1</diffuse>
             <specular>0 0 0 1</specular>
-            <pbr><metal><albedo_map>photo3.jpg</albedo_map></metal></pbr>
+            <emissive>1 1 1 1</emissive>
+            <pbr><metal><albedo_map>photo3.jpg</albedo_map><emissive_map>photo3.jpg</emissive_map></metal></pbr>
           </material>
           <cast_shadows>false</cast_shadows>
         </visual>
@@ -165,7 +168,8 @@
           <material>
             <diffuse>1 1 1 1</diffuse>
             <specular>0 0 0 1</specular>
-            <pbr><metal><albedo_map>photo4.jpg</albedo_map></metal></pbr>
+            <emissive>1 1 1 1</emissive>
+            <pbr><metal><albedo_map>photo4.jpg</albedo_map><emissive_map>photo4.jpg</emissive_map></metal></pbr>
           </material>
           <cast_shadows>false</cast_shadows>
         </visual>
@@ -185,7 +189,8 @@
           <material>
             <diffuse>1 1 1 1</diffuse>
             <specular>0 0 0 1</specular>
-            <pbr><metal><albedo_map>photo5.jpg</albedo_map></metal></pbr>
+            <emissive>1 1 1 1</emissive>
+            <pbr><metal><albedo_map>photo5.jpg</albedo_map><emissive_map>photo5.jpg</emissive_map></metal></pbr>
           </material>
           <cast_shadows>false</cast_shadows>
         </visual>
@@ -205,7 +210,8 @@
           <material>
             <diffuse>1 1 1 1</diffuse>
             <specular>0 0 0 1</specular>
-            <pbr><metal><albedo_map>photo6.jpg</albedo_map></metal></pbr>
+            <emissive>1 1 1 1</emissive>
+            <pbr><metal><albedo_map>photo6.jpg</albedo_map><emissive_map>photo6.jpg</emissive_map></metal></pbr>
           </material>
           <cast_shadows>false</cast_shadows>
         </visual>
