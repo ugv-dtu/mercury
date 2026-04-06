@@ -65,6 +65,7 @@
         </camera>
       </sensor>
     </gazebo>
+    
     <gazebo reference="side_camera_link">
   <sensor name="side_camera_sensor" type="camera">
     <always_on>true</always_on>
