@@ -25,10 +25,9 @@ class RoadLineCostmapNode(Node):
         self.declare_parameter('bev_width', 800)
         self.declare_parameter('bev_height', 600)
         self.declare_parameter('decay_rate', 0.985)
-        self.declare_parameter('resolution', 0.007)
+        self.declare_parameter('resolution', 0.0051)
         self.declare_parameter('undistort', True)
         self.declare_parameter('show_debug', True)
-        self.declare_parameter('min_detection_distance', 3)
 
         self._read_params()
 
@@ -77,7 +76,6 @@ class RoadLineCostmapNode(Node):
         self.resolution = self.get_parameter('resolution').value
         self.undistort = self.get_parameter('undistort').value
         self.show_debug = self.get_parameter('show_debug').value
-        self.min_detection_distance = self.get_parameter('min_detection_distance').value
 
     def map_callback(self, msg):
         new_w = msg.info.width
@@ -123,10 +121,10 @@ class RoadLineCostmapNode(Node):
         h, w = frame.shape[:2]
 
         src = np.float32([
-            [w * 0.02, h * 0.525], #bl
-            [w * 0.98, h * 0.525], #br
-            [w * 0.225, h * 0.3],  #tl
-            [w * 0.775, h * 0.3]   #tr
+            [w * 0.02, h * 0.65], #bl
+            [w * 0.98, h * 0.65], #br
+            [w * 0.25, h * 0.1], #tl
+            [w * 0.75, h * 0.1] #tr
         ])
 
         dst = np.float32([
@@ -155,19 +153,18 @@ class RoadLineCostmapNode(Node):
 
         if self.homography is None:
             self.compute_homography(frame)
-
+        
         if self.show_debug:
             cv2.imshow("1_raw", frame)
 
         bev = cv2.warpPerspective(frame, self.homography, (self.bev_w, self.bev_h))
-
+        
         if self.show_debug:
             cv2.imshow("2_bev", bev)
-
+        
         mask = self.detect_white_lines(bev)
         if self.show_debug:
             cv2.imshow("3_mask", mask)
-
         grid = self.mask_to_grid(mask, msg.header.stamp)
 
         if grid is not None:
@@ -203,7 +200,7 @@ class RoadLineCostmapNode(Node):
 
         try:
             t = self.tf_buffer.lookup_transform(
-                "map",
+                self.costmap_frame,
                 "camera_link",
                 rclpy.time.Time()
             )
@@ -218,39 +215,39 @@ class RoadLineCostmapNode(Node):
         bev_res = self.resolution
         bev_h, bev_w = mask.shape
 
+        current_grid = np.zeros((self.map_height, self.map_width), dtype=np.uint8)
+
         white_pixels = np.argwhere(mask > 0)
-        if len(white_pixels) > 0:
-            rows = white_pixels[:, 0].astype(np.float64)
-            cols = white_pixels[:, 1].astype(np.float64)
+        if len(white_pixels) == 0:
+            return self._build_grid_msg(stamp, current_grid)
 
-            dx_robot = (bev_h - 1.0 - rows) * bev_res
-            dy_robot = (bev_w / 2.0 - cols) * bev_res
+        rows = white_pixels[:, 0].astype(np.float64)
+        cols = white_pixels[:, 1].astype(np.float64)
 
-            # Filter out detections that are too close to the robot
-            dist_from_robot = np.sqrt(dx_robot**2 + dy_robot**2)
-            far_enough = dist_from_robot > self.min_detection_distance
+        dx_robot = (bev_h - 1.0 - rows) * bev_res
+        dy_robot = (bev_w / 2.0 - cols) * bev_res
 
-            cos_y = math.cos(yaw)
-            sin_y = math.sin(yaw)
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
 
-            map_x = tx + dx_robot * cos_y - dy_robot * sin_y
-            map_y = ty + dx_robot * sin_y + dy_robot * cos_y
+        map_x = tx + dx_robot * cos_y - dy_robot * sin_y
+        map_y = ty + dx_robot * sin_y + dy_robot * cos_y
 
-            gx = ((map_x - self.map_origin_x) / self.map_res).astype(int)
-            gy = ((map_y - self.map_origin_y) / self.map_res).astype(int)
+        gx = ((map_x - self.map_origin_x) / self.map_res).astype(int)
+        gy = ((map_y - self.map_origin_y) / self.map_res).astype(int)
 
-            # Only write cells that are: in bounds, far enough, and not already marked
-            in_bounds = (gx >= 0) & (gx < self.map_width) & (gy >= 0) & (gy < self.map_height)
-            valid = in_bounds & far_enough
+        valid = (gx >= 0) & (gx < self.map_width) & (gy >= 0) & (gy < self.map_height)
 
-            # Among valid cells, only write to ones not already marked
-            not_yet_marked = self.map_grid[gy[valid], gx[valid]] == 0
-            gy_new = gy[valid][not_yet_marked]
-            gx_new = gx[valid][not_yet_marked]
+        temp = np.zeros_like(current_grid, dtype=np.uint8)
+        temp[gy[valid], gx[valid]] = 255
 
-            self.map_grid[gy_new, gx_new] = 100
+        dist = cv2.distanceTransform(255 - temp, cv2.DIST_L2, 5)
 
-        return self._build_grid_msg(stamp, self.map_grid)
+        sigma = 5.0
+        cost = np.exp(-(dist**2) / (2 * sigma**2)) * 100
+        current_grid = cost.astype(np.uint8)
+
+        return self._build_grid_msg(stamp, current_grid)
 
     def _build_grid_msg(self, stamp, grid_data):
         grid = OccupancyGrid()
@@ -269,7 +266,6 @@ class RoadLineCostmapNode(Node):
         grid.data = grid_data.flatten().tolist()
         return grid
 
-
 def main():
     rclpy.init()
     node = RoadLineCostmapNode()
@@ -279,7 +275,6 @@ def main():
         pass
     node.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()

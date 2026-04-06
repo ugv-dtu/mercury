@@ -15,10 +15,10 @@ def generate_launch_description():
                 "image_topic": "/camera/image_raw",
                 "camera_info_topic": "/camera/camera_info",
                 "costmap_topic": "/perception/road_costmap",
-                "costmap_frame": "map",
+                "costmap_frame": "odom",            # ← also fix this (was "base_link")
                 "bev_width": 800,
                 "bev_height": 600,
-                "resolution": 0.007,
+                "resolution": 0.0051,
                 "undistort": True,
                 "show_debug": True,
             }
