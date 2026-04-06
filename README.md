@@ -14,8 +14,3 @@ sudo docker compose run ros
 colcon build
 ros2 launch bringup bringup_sim.launch.py
 ```
-
-# Add this to your bashrc/zshrc
-```
-export GZ_SIM_SYSTEM_PLUGIN_PATH=/opt/ros/jazzy/li
-```
