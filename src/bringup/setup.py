@@ -14,8 +14,6 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'),
         glob('launch/*.launch.py')),
-        (os.path.join('share', package_name, 'config'),  # Add this
-        glob('config/*')), 
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,7 +28,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'twist_to_stamped = bringup.twist_to_stamped:main',
         ],
     },
 )
