@@ -24,8 +24,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'lane_costmap = perception.lane_costmap:main',
-            'calibrate_homography = perception.calibrate_homography:main',
         ],
     },
 )
