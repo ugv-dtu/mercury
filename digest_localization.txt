@@ -1,0 +1,258 @@
+Directory structure:
+└── localization/
+    ├── CMakeLists.txt
+    ├── package.xml
+    ├── config/
+    │   └── ekf.yaml
+    └── launch/
+        ├── ekf.launch.py
+        ├── localization.launch.py
+        └── slam.launch.py
+
+================================================
+FILE: CMakeLists.txt
+================================================
+cmake_minimum_required(VERSION 3.8)
+project(localization)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+
+install(DIRECTORY
+  launch
+  config
+  DESTINATION share/${PROJECT_NAME}
+)
+
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  # the following line skips the linter which checks for copyrights
+  # comment the line when a copyright and license is added to all source files
+  set(ament_cmake_copyright_FOUND TRUE)
+  # the following line skips cpplint (only works in a git repo)
+  # comment the line when this package is in a git repo and when
+  # a copyright and license is added to all source files
+  set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
+ament_package()
+
+
+
+================================================
+FILE: package.xml
+================================================
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>localization</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="dev@todo.todo">dev</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>tf2_ros</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+
+
+
+================================================
+FILE: config/ekf.yaml
+================================================
+# ekf_filter_node:
+#   ros__parameters:
+
+#     frequency: 50.0
+#     sensor_timeout: 0.1
+#     two_d_mode: true
+
+#     map_frame: map
+#     odom_frame: odom
+#     base_link_frame: base_link
+#     world_frame: odom
+
+#     imu0: /camera/camera/imu
+
+#     imu0_config: [false, false, false,
+#                   false, false, false,
+#                   false, false, false,
+#                   false, false, true,
+#                   false, false, false]
+
+#     imu0_differential: false
+#     imu0_relative: false
+#     imu0_remove_gravitational_acceleration: true
+
+#     publish_tf: true
+
+ekf_filter_node:
+  ros__parameters:
+
+    use_sim_time: true
+
+    frequency: 50.0
+    two_d_mode: true
+
+    publish_tf: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    odom0: /diff_drive_controller/odom
+    odom0_config: [true, true, false,
+                   false, false, true,
+                   true, true, false,
+                   false, false, true,
+                   false, false, false]
+
+    imu0: /imu
+    imu0_config: [false, false, false,
+                  true, true, true,
+                  false, false, false,
+                  true, true, true,
+                  false, false, false]
+
+    imu0_remove_gravitational_acceleration: true
+
+
+
+================================================
+FILE: launch/ekf.launch.py
+================================================
+from launch import LaunchDescription
+from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
+import os
+
+def generate_launch_description():
+
+    pkg_localization = get_package_share_directory('localization')
+    ekf_yaml = os.path.join(pkg_localization, 'config', 'ekf.yaml')
+
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[ekf_yaml]
+    )
+
+    return LaunchDescription([
+        ekf_node
+    ])
+
+
+================================================
+FILE: launch/localization.launch.py
+================================================
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.substitutions import FindPackageShare
+from launch.substitutions import PathJoinSubstitution
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+
+    ekf = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('localization'),
+                'launch',
+                'ekf.launch.py'
+            ])
+        )
+    )
+
+    slam = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('localization'),
+                'launch',
+                'slam.launch.py'
+            ])
+        )
+    )
+
+    lifecycle_manager = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager_localization',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'autostart': True,
+            'bond_timeout': 10.0,
+            'node_names': ['slam_toolbox']
+        }]
+    )
+
+    return LaunchDescription([
+        ekf,
+        slam,
+        lifecycle_manager
+    ])
+
+
+================================================
+FILE: launch/slam.launch.py
+================================================
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+
+    slam_node = Node(
+        package='slam_toolbox',
+        executable='async_slam_toolbox_node',
+        name='slam_toolbox',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'odom_frame': 'odom',
+            'base_frame': 'base_link',
+            'map_frame': 'map',
+            'scan_topic': '/scan',
+            'mode': 'mapping',
+            'resolution': 0.05,
+            'max_laser_range': 10.0,
+            'minimum_travel_distance': 0.02,
+            'minimum_travel_heading': 0.02,
+            'scan_queue_size': 20,
+            'throttle_scans': 1,
+            'map_update_interval': 0.3,
+            'transform_timeout': 0.2,
+            'tf_buffer_duration': 30.0
+        }]
+    )
+
+    return LaunchDescription([
+        slam_node
+    ])
+

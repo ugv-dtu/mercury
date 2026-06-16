@@ -1,0 +1,1457 @@
+Directory structure:
+└── bringup/
+    ├── package.xml
+    ├── setup.cfg
+    ├── setup.py
+    ├── bringup/
+    │   ├── __init__.py
+    │   ├── goal_decomposer.py
+    │   └── twist_to_stamped.py
+    ├── config/
+    │   └── bringup.rviz
+    ├── launch/
+    │   ├── bringup_base.launch.py
+    │   ├── bringup_real.launch.py
+    │   └── bringup_sim.launch.py
+    ├── resource/
+    │   └── bringup
+    └── test/
+        ├── test_copyright.py
+        ├── test_flake8.py
+        └── test_pep257.py
+
+================================================
+FILE: package.xml
+================================================
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>bringup</name>
+  <version>0.0.0</version>
+  <description>Bringup package for mercury UGV</description>
+  <maintainer email="dev@todo.todo">dev</maintainer>
+  <license>MIT</license>
+
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <!-- added for Bool / Float32 used by lane_assist_node -->
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+
+
+================================================
+FILE: setup.cfg
+================================================
+[develop]
+script_dir=$base/lib/bringup
+[install]
+install_scripts=$base/lib/bringup
+
+
+
+================================================
+FILE: setup.py
+================================================
+from setuptools import find_packages, setup
+import os
+from glob import glob
+
+package_name = 'bringup'
+
+setup(
+    name=package_name,
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'),
+        glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'),
+        glob('config/*')),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='dev',
+    maintainer_email='dev@todo.todo',
+    description='Bringup package for mercury UGV',
+    license='MIT',
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
+    entry_points={
+        'console_scripts': [
+            'twist_to_stamped = bringup.twist_to_stamped:main',
+            'goal_decomposer  = bringup.goal_decomposer:main',
+        ],
+    },
+)
+
+
+================================================
+FILE: bringup/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: bringup/goal_decomposer.py
+================================================
+"""
+goal_decomposer.py  (v7 — gate-only, no nav2 fighting)
+--------------------------------------------------------
+DESIGN PHILOSOPHY:
+  The decomposer does NOT fight Nav2's BT navigator.
+  It works by:
+    1. Receiving a goal (RViz /goal_pose or terminal /goal_decomposer/goal)
+    2. Computing a path with Nav2's planner
+    3. Sampling GATE PLANES every path_sample_dist metres along that path
+    4. Sending the FULL ORIGINAL GOAL to Nav2 navigate_to_pose ONCE
+    5. Monitoring robot position — when robot crosses a gate plane, mark WP done
+    6. When ALL gates are crossed, mission complete
+
+  The key insight: we send ONE goal to Nav2 and let it drive the robot all the
+  way there. We only watch the robot's position against the gate planes.
+  We NEVER send sub-goals to Nav2 (no more fighting over the action server).
+
+GATE / FINISH-LINE LOGIC:
+  Each waypoint has a "gate plane" — an infinite line perpendicular to the
+  path direction at a point gate_dist metres BEFORE the waypoint.
+  The robot "passes" the waypoint when it crosses from behind to in front of
+  that gate plane (dot product crosses zero).
+
+  This means:
+  - The robot does NOT need to stop AT the waypoint
+  - The robot just needs to cross the imaginary finish line
+  - Works even if Nav2 routes slightly off the sampled path
+
+WAYPOINT PLACEMENT:
+  Waypoints are sampled along Nav2's planned path, so they ARE on the lane
+  centre (the path follows the costmap which is built from the track geometry).
+  If lane_detection is running, the robot will also be corrected to stay in
+  the lane centre via lane_assist_node.
+
+WHY (26,-7) FAILS:
+  NavFn fails with "Failed to create plan from potential" when:
+  1. The goal is in unknown/obstacle space in the costmap
+  2. The costmap hasn't seen that area yet (rolling window = only sees nearby)
+  Solution: The fallback now sends the goal DIRECTLY to Nav2 navigate_to_pose
+  which uses Nav2's internal replanning. Nav2's BT will keep trying to replan
+  as the costmap builds up as the robot moves forward.
+
+COMPLETE FIX SUMMARY:
+  - No more sub-goal sending → no more instant abort race condition
+  - Gate-plane crossing as primary WP completion trigger
+  - One Nav2 goal for the full mission
+  - Fallback to direct nav when planner fails (robot drives toward goal,
+    costmap builds, Nav2 replanns automatically)
+"""
+
+import math
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry, Path
+from nav2_msgs.action import NavigateToPose, ComputePathToPose
+from std_msgs.msg import String
+import tf_transformations
+
+
+# ── Tiny helper: perpendicular-gate crossing test ─────────────────────────────
+def _crossed_gate(rx, ry, wp_x, wp_y, wp_yaw, gate_dist):
+    """
+    Returns True when the robot has crossed the gate plane.
+
+    Gate plane: a line perpendicular to the path at a point `gate_dist`
+    metres BEFORE (wp_x, wp_y) along the heading wp_yaw.
+
+        gate_point = (wp_x - gate_dist * cos(yaw),
+                      wp_y - gate_dist * sin(yaw))
+
+    Robot has crossed when the dot product of
+        (robot - gate_point) · forward_direction  >= 0
+    i.e. robot is on the far side of the gate line.
+    """
+    fwd_x  = math.cos(wp_yaw)
+    fwd_y  = math.sin(wp_yaw)
+    gate_x = wp_x - gate_dist * fwd_x
+    gate_y = wp_y - gate_dist * fwd_y
+    dot    = (rx - gate_x) * fwd_x + (ry - gate_y) * fwd_y
+    return dot >= 0.0
+
+
+class GoalDecomposerNode(Node):
+
+    def __init__(self):
+        super().__init__('goal_decomposer_node')
+
+        # ── Parameters ────────────────────────────────────────────────
+        # How far apart to place waypoint gate planes along the path (metres)
+        self.declare_parameter('path_sample_dist',    2.0)
+
+        # Gate plane is this far BEFORE the waypoint centre (metres)
+        # Larger = robot triggers gate earlier. 0.5m is a narrow gate.
+        # 1.0m gives comfortable early trigger without false positives.
+        self.declare_parameter('gate_dist',           1.0)
+
+        # Reject new goals that are this close to the current goal (metres)
+        self.declare_parameter('min_goal_dist',       0.5)
+
+        # Seconds to wait between requesting plan and starting gate monitoring
+        self.declare_parameter('plan_retry_delay_sec', 4.0)
+
+        # How long to wait for Nav2 to finish cancelling before re-sending (s)
+        self.declare_parameter('nav2_settle_sec',      1.5)
+
+        self.sample_dist      = self.get_parameter('path_sample_dist').value
+        self.gate_dist        = self.get_parameter('gate_dist').value
+        self.min_goal_dist    = self.get_parameter('min_goal_dist').value
+        self.plan_retry_delay = self.get_parameter('plan_retry_delay_sec').value
+        self.nav2_settle      = self.get_parameter('nav2_settle_sec').value
+
+        # ── Robot pose ────────────────────────────────────────────────
+        self.robot_x   = 0.0
+        self.robot_y   = 0.0
+        self.robot_yaw = 0.0
+
+        # ── Mission state ─────────────────────────────────────────────
+        # Each gate is: (wp_x, wp_y, wp_yaw, name, crossed:bool)
+        self._gates:         list[dict] = []
+        self._gate_idx       = 0           # next gate to watch for
+        self._mission_active = False
+        self._last_goal_xy   = None
+        self._current_goal   = None        # PoseStamped of full mission goal
+        self._plan_attempts  = 0
+        self._nav_handle     = None        # active Nav2 action handle
+        self._pending_nav_goal = None      # goal to send after settle delay
+        self._settle_until   = 0.0         # wall time to wait before re-sending
+
+        # ── Subscribers ───────────────────────────────────────────────
+        self.create_subscription(
+            PoseStamped, '/goal_pose',
+            self._goal_cb, 10)
+        self.create_subscription(
+            PoseStamped, '/goal_decomposer/goal',
+            self._goal_cb, 10)
+        self.create_subscription(
+            Odometry, '/diff_drive_controller/odom',
+            self._odom_cb, 10)
+
+        # ── Publishers ────────────────────────────────────────────────
+        self._status_pub = self.create_publisher(
+            String, '/goal_decomposer/status', 5)
+        self._path_pub   = self.create_publisher(
+            Path, '/goal_decomposer/debug_path', 5)
+        self._wp_pub     = self.create_publisher(
+            Path, '/goal_decomposer/waypoints', 5)  # gate centres for RViz
+
+        # ── Action clients ────────────────────────────────────────────
+        self._plan_client = ActionClient(
+            self, ComputePathToPose, '/compute_path_to_pose')
+        self._nav_client  = ActionClient(
+            self, NavigateToPose, '/navigate_to_pose')
+
+        # ── Timers ────────────────────────────────────────────────────
+        self.create_timer(0.05, self._gate_monitor)   # 20 Hz gate check
+        self.create_timer(1.0,  self._status_timer)   # 1 Hz status log
+
+        self.get_logger().info(
+            f'GoalDecomposerNode v7  '
+            f'sample={self.sample_dist}m  gate_dist={self.gate_dist}m')
+        self.get_logger().info(
+            'Send goal: ros2 topic pub --once /goal_decomposer/goal '
+            'geometry_msgs/msg/PoseStamped '
+            '"{header: {frame_id: map}, pose: {position: {x: 26.0, y: -7.0}, '
+            'orientation: {w: 1.0}}}"')
+
+    # ─────────────────────────────────────────────────────────────────
+    # Odometry
+    # ─────────────────────────────────────────────────────────────────
+    def _odom_cb(self, msg: Odometry):
+        self.robot_x = msg.pose.pose.position.x
+        self.robot_y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        _, _, self.robot_yaw = tf_transformations.euler_from_quaternion(
+            [q.x, q.y, q.z, q.w])
+
+    # ─────────────────────────────────────────────────────────────────
+    # Goal callback — called by RViz /goal_pose or terminal
+    # ─────────────────────────────────────────────────────────────────
+    def _goal_cb(self, msg: PoseStamped):
+        gx = msg.pose.position.x
+        gy = msg.pose.position.y
+
+        # Deduplicate near-identical goals
+        if self._last_goal_xy is not None:
+            if math.hypot(gx - self._last_goal_xy[0],
+                          gy - self._last_goal_xy[1]) < self.min_goal_dist:
+                return
+
+        self._last_goal_xy = (gx, gy)
+        dist = math.hypot(gx - self.robot_x, gy - self.robot_y)
+
+        self.get_logger().info(
+            f'New goal ({gx:.2f}, {gy:.2f})  dist={dist:.2f}m')
+        self._pub_status(f'planning to ({gx:.1f},{gy:.1f}) dist={dist:.1f}m')
+
+        # Cancel any running navigation cleanly
+        self._abort_mission()
+
+        self._current_goal  = msg
+        self._plan_attempts = 0
+        self._gates.clear()
+        self._gate_idx      = 0
+
+        self._request_plan(msg)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Planning
+    # ─────────────────────────────────────────────────────────────────
+    def _request_plan(self, goal_pose: PoseStamped):
+        if not self._plan_client.wait_for_server(timeout_sec=3.0):
+            self.get_logger().warn(
+                'compute_path_to_pose unavailable — sending direct nav goal')
+            self._start_navigation(goal_pose)
+            return
+
+        plan_goal            = ComputePathToPose.Goal()
+        plan_goal.goal       = goal_pose
+        plan_goal.planner_id = 'GridBased'   # matches planner_plugins key in nav2_params.yaml
+        plan_goal.use_start  = False
+
+        self._plan_attempts += 1
+        self.get_logger().info(
+            f'Requesting path from planner (attempt {self._plan_attempts})...')
+
+        fut = self._plan_client.send_goal_async(plan_goal)
+        fut.add_done_callback(self._plan_response_cb)
+
+    def _plan_response_cb(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().warn('Plan goal rejected')
+            self._on_plan_fail()
+            return
+        handle.get_result_async().add_done_callback(self._plan_result_cb)
+
+    def _plan_result_cb(self, future):
+        result = future.result()
+        path   = result.result.path
+
+        if not path.poses:
+            self.get_logger().warn('Planner returned empty / failed path')
+            self._on_plan_fail()
+            return
+
+        self.get_logger().info(
+            f'Path received: {len(path.poses)} poses')
+        self._path_pub.publish(path)
+
+        # Build gate list from path
+        self._gates    = self._build_gates(path)
+        self._gate_idx = 0
+
+        self.get_logger().info(
+            f'Created {len(self._gates)} gate planes '
+            f'(every {self.sample_dist}m)')
+
+        # Publish gate centres for RViz visualisation
+        self._pub_gates_as_path(path.header)
+
+        # Now send ONE navigate_to_pose to the actual goal
+        self._start_navigation(self._current_goal)
+
+    def _on_plan_fail(self):
+        if self._plan_attempts < 2 and self._current_goal is not None:
+            delay = self.get_clock().now().nanoseconds / 1e9 + self.plan_retry_delay
+            self.get_logger().info(
+                f'Retrying plan in {self.plan_retry_delay:.1f}s...')
+            # Store retry time — checked in gate_monitor
+            self._settle_until     = delay
+            self._pending_nav_goal = None   # signal: retry plan, not nav
+            return
+
+        # Give up planning — send direct nav and let Nav2 figure it out
+        # Nav2's BT will replan internally as costmap builds while driving
+        self.get_logger().warn(
+            'Planning failed after retries — sending goal directly to Nav2. '
+            'Nav2 will replan as map builds.')
+        self._gates    = []
+        self._gate_idx = 0
+        self._start_navigation(self._current_goal)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Gate building
+    # ─────────────────────────────────────────────────────────────────
+    def _build_gates(self, path: Path) -> list[dict]:
+        """
+        Sample gate planes every sample_dist metres along the planned path.
+        Each gate is perpendicular to the LOCAL path direction at that point.
+
+        The gate plane position is placed ON THE LANE CENTRE (the planner
+        path follows the lane centre in the costmap).
+
+        Returns list of dicts:
+            x, y    — gate centre (on the path = lane centre)
+            yaw     — local path heading at that point
+            name    — "WP-N"
+            crossed — False initially
+        """
+        poses  = path.poses
+        gates  = []
+        accum  = 0.0
+        count  = 1
+
+        for i in range(1, len(poses)):
+            px = poses[i-1].pose.position.x
+            py = poses[i-1].pose.position.y
+            cx = poses[i].pose.position.x
+            cy = poses[i].pose.position.y
+            seg = math.hypot(cx - px, cy - py)
+            accum += seg
+
+            if accum >= self.sample_dist:
+                # Compute local heading from this segment
+                yaw = math.atan2(cy - py, cx - px)
+                gates.append({
+                    'x':       cx,
+                    'y':       cy,
+                    'yaw':     yaw,
+                    'name':    f'WP-{count}',
+                    'crossed': False,
+                })
+                count += 1
+                accum = 0.0
+
+        # Final gate AT the goal
+        if poses:
+            last  = poses[-1]
+            prev  = poses[-2] if len(poses) > 1 else poses[-1]
+            dx    = last.pose.position.x - prev.pose.position.x
+            dy    = last.pose.position.y - prev.pose.position.y
+            yaw   = math.atan2(dy, dx) if (dx != 0 or dy != 0) else 0.0
+            gates.append({
+                'x':       last.pose.position.x,
+                'y':       last.pose.position.y,
+                'yaw':     yaw,
+                'name':    f'WP-{count} (GOAL)',
+                'crossed': False,
+            })
+
+        return gates
+
+    def _pub_gates_as_path(self, header):
+        """Publish gate centres as a Path so they show in RViz."""
+        p = Path()
+        p.header = header
+        for g in self._gates:
+            ps = PoseStamped()
+            ps.header = header
+            ps.pose.position.x = g['x']
+            ps.pose.position.y = g['y']
+            ps.pose.position.z = 0.1   # slightly above ground for visibility
+            # Encode heading in orientation
+            import math
+            yaw = g['yaw']
+            ps.pose.orientation.z = math.sin(yaw / 2)
+            ps.pose.orientation.w = math.cos(yaw / 2)
+            p.poses.append(ps)
+        self._wp_pub.publish(p)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Navigation — send ONE goal to Nav2
+    # ─────────────────────────────────────────────────────────────────
+    def _start_navigation(self, goal_pose: PoseStamped):
+        if goal_pose is None:
+            return
+
+        if not self._nav_client.wait_for_server(timeout_sec=3.0):
+            self.get_logger().error('/navigate_to_pose server not available')
+            return
+
+        gx = goal_pose.pose.position.x
+        gy = goal_pose.pose.position.y
+        self.get_logger().info(
+            f'Sending navigation goal to Nav2: ({gx:.2f}, {gy:.2f})')
+        self._pub_status(
+            f'navigating to ({gx:.1f},{gy:.1f})  '
+            f'{len(self._gates)} gates to cross')
+
+        nav_goal      = NavigateToPose.Goal()
+        nav_goal.pose = goal_pose
+
+        self._mission_active = True
+        fut = self._nav_client.send_goal_async(nav_goal)
+        fut.add_done_callback(self._nav_response_cb)
+
+    def _nav_response_cb(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().error(
+                'Nav2 rejected the navigation goal! '
+                'Is Nav2 lifecycle manager running?')
+            self._mission_active = False
+            return
+        self._nav_handle = handle
+        self.get_logger().info('Nav2 accepted goal — monitoring gate crossings')
+        handle.get_result_async().add_done_callback(self._nav_result_cb)
+
+    def _nav_result_cb(self, future):
+        """Called when Nav2 finishes (success, abort, or cancel)."""
+        result = future.result()
+        status = result.status   # 4=SUCCEEDED 5=CANCELED 6=ABORTED
+
+        self._nav_handle     = None
+        self._mission_active = False
+
+        if status == 4:
+            self.get_logger().info(
+                'Nav2 reached the goal — mission complete!')
+            self._pub_status('MISSION COMPLETE (Nav2 success)')
+            self._mark_all_gates_crossed()
+        elif status == 5:
+            self.get_logger().info('Nav2 goal canceled (new goal received)')
+        else:
+            self.get_logger().warn(
+                f'Nav2 aborted (status={status}). '
+                'Robot may be stuck or goal is unreachable. '
+                'Nav2 will have attempted recovery behaviours.')
+            self._pub_status(f'Nav2 ABORTED status={status}')
+
+    # ─────────────────────────────────────────────────────────────────
+    # Gate monitoring — runs at 20 Hz
+    # ─────────────────────────────────────────────────────────────────
+    def _gate_monitor(self):
+        now = self.get_clock().now().nanoseconds / 1e9
+
+        # Handle plan retry timing
+        if (not self._mission_active
+                and self._settle_until > 0
+                and now >= self._settle_until
+                and self._current_goal is not None
+                and self._pending_nav_goal is None
+                and self._plan_attempts < 2):
+            self._settle_until = 0.0
+            self._request_plan(self._current_goal)
+            return
+
+        if not self._mission_active or not self._gates:
+            return
+
+        # Find the next uncrossed gate
+        while (self._gate_idx < len(self._gates)
+               and self._gates[self._gate_idx]['crossed']):
+            self._gate_idx += 1
+
+        if self._gate_idx >= len(self._gates):
+            # All gates crossed
+            self.get_logger().info(
+                'All gate planes crossed — mission waypoints complete!')
+            self._pub_status('MISSION COMPLETE (all gates crossed)')
+            return
+
+        g = self._gates[self._gate_idx]
+
+        if _crossed_gate(
+                self.robot_x, self.robot_y,
+                g['x'], g['y'], g['yaw'],
+                self.gate_dist):
+
+            g['crossed'] = True
+            crossed_count = sum(1 for g2 in self._gates if g2['crossed'])
+            total         = len(self._gates)
+
+            self.get_logger().info(
+                f'✓ Gate crossed: {g["name"]}  '
+                f'({g["x"]:.2f}, {g["y"]:.2f})  '
+                f'[{crossed_count}/{total}]  '
+                f'robot=({self.robot_x:.2f}, {self.robot_y:.2f})')
+
+            self._pub_status(
+                f'gate {crossed_count}/{total}: {g["name"]} ✓')
+
+            self._gate_idx += 1
+
+    # ─────────────────────────────────────────────────────────────────
+    # Abort current mission cleanly
+    # ─────────────────────────────────────────────────────────────────
+    def _abort_mission(self):
+        self._mission_active = False
+        self._settle_until   = 0.0
+        if self._nav_handle is not None:
+            self.get_logger().info('Canceling current Nav2 goal...')
+            self._nav_handle.cancel_goal_async()
+            self._nav_handle = None
+
+    def _mark_all_gates_crossed(self):
+        for g in self._gates:
+            g['crossed'] = True
+        self._gate_idx = len(self._gates)
+
+    # ─────────────────────────────────────────────────────────────────
+    # Status timer
+    # ─────────────────────────────────────────────────────────────────
+    def _status_timer(self):
+        if not self._mission_active:
+            return
+        crossed = sum(1 for g in self._gates if g['crossed'])
+        total   = len(self._gates)
+        nxt     = (self._gates[self._gate_idx]['name']
+                   if self._gate_idx < total else 'DONE')
+        self.get_logger().info(
+            f'[Mission] gates={crossed}/{total}  '
+            f'next={nxt}  '
+            f'robot=({self.robot_x:.2f}, {self.robot_y:.2f})')
+
+    # ─────────────────────────────────────────────────────────────────
+    # Status publisher
+    # ─────────────────────────────────────────────────────────────────
+    def _pub_status(self, msg: str):
+        s      = String()
+        s.data = msg
+        self._status_pub.publish(s)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = GoalDecomposerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================
+FILE: bringup/twist_to_stamped.py
+================================================
+"""
+twist_to_stamped.py
+-------------------
+Converts Twist → TwistStamped for the diff_drive_controller.
+
+CHANGE from original:
+  Now subscribes to /cmd_vel_nav (output of lane_assist_node) instead
+  of /cmd_vel directly.  The chain is:
+
+    Nav2 → /cmd_vel → lane_assist_node → /cmd_vel_nav → twist_to_stamped → /cmd_vel_stamped → hw
+"""
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist, TwistStamped
+
+
+class TwistToStamped(Node):
+
+    def __init__(self):
+        super().__init__('twist_to_stamped')
+
+        self.sub = self.create_subscription(
+            Twist,
+            '/cmd_vel',   # ← was /cmd_vel
+            self.callback,
+            10
+        )
+
+        self.pub = self.create_publisher(
+            TwistStamped,
+            '/cmd_vel_stamped',
+            10
+        )
+
+    def callback(self, msg):
+        stamped = TwistStamped()
+        stamped.header.stamp = self.get_clock().now().to_msg()
+        stamped.header.frame_id = 'base_link'
+        stamped.twist = msg
+        self.pub.publish(stamped)
+
+
+def main():
+    rclpy.init()
+    node = TwistToStamped()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
+
+================================================
+FILE: config/bringup.rviz
+================================================
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 138
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Status1
+        - /Map1
+        - /Map2
+        - /Map3
+      Splitter Ratio: 0.5
+    Tree Height: 589
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Expanded:
+      - /2D Goal Pose1
+      - /Publish Point1
+    Name: Tool Properties
+    Splitter Ratio: 0.5886790156364441
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Time
+    Experimental: false
+    Name: Time
+    SyncMode: 0
+    SyncSource: LaserScan
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: false
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 100
+      Reference Frame: <Fixed Frame>
+      Value: false
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Link Tree Style: Links in Alphabetic Order
+        base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        camera_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front_left_wheel_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        front_right_wheel_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        gps_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        imu_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        lidar_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        pan_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear_left_wheel_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        rear_right_wheel_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        tilt_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        turret_camera_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+      Mass Properties:
+        Inertia: false
+        Mass: false
+      Name: RobotModel
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: LANE CAMERA
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /camera/image_raw
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/LaserScan
+      Color: 255; 255; 255
+      Color Transformer: Intensity
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 0
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: LaserScan
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.009999999776482582
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /scan
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_costmap/costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_costmap/costmap_updates
+      Use Timestamp: false
+      Value: true
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map_updates
+      Use Timestamp: false
+      Value: true
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 25; 255; 0
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /local_plan
+      Value: true
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/road_costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/road_costmap_updates
+      Use Timestamp: false
+      Value: true
+    - Class: rviz_default_plugins/Pose
+      Name: CarrotGoal
+      Topic:
+        Value: /goal_pose
+      Color: 255; 0; 0
+      Shaft Length: 0.5
+      Enabled: true
+    - Alpha: 0.699999988079071
+      Binary representation: false
+      Binary threshold: 100
+      Class: rviz_default_plugins/Map
+      Color Scheme: costmap
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/pothole_costmap
+      Update Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/pothole_costmap_updates
+      Use Timestamp: false
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: TURRET CAMERA
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /turret_camera/image_raw
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 144
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /final_goal    # was /goal_pose
+    - Class: rviz_default_plugins/PublishPoint
+      Single click: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /clicked_point
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 19.55330467224121
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: -0.470981627702713
+        Y: -0.04031693935394287
+        Z: 1.1855770349502563
+      Focal Shape Fixed Size: false
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.9403978586196899
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 3.2153990268707275
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1662
+  Hide Left Dock: false
+  Hide Right Dock: false
+  LANE CAMERA:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd0000000400000000000001f400000574fc020000000efb0000001200530065006c0065006300740069006f006e00000001e10000009b000000b200fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c0061007900730100000070000003490000018600fffffffb0000000a0049006d00610067006501000003f2000001000000000000000000fb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000000a0049006d00610067006501000004f5000000ef0000000000000000fb0000000c00430061006d00650072006100000004fe000000e60000000000000000fb0000000a0049006d00610067006501000004fe000000e60000000000000000fb00000016004c0041004e0045002000430041004d00450052004101000003c5000001090000002800fffffffb0000001a005400550052005200450054002000430041004d00450052004101000004da0000010a0000002800ffffff000000010000015d00000574fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a005600690065007700730100000070000005740000013800fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000055e0000005efc0100000002fb0000000800540069006d006501000000000000055e0000047a00fffffffb0000000800540069006d00650100000000000004500000000000000000000001f50000057400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Selection:
+    collapsed: false
+  TURRET CAMERA:
+    collapsed: false
+  Time:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1374
+  X: 1337
+  Y: 230
+
+
+
+================================================
+FILE: launch/bringup_base.launch.py
+================================================
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.substitutions import FindPackageShare
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+
+    declare_xacro_file_arg = DeclareLaunchArgument(
+        'xacro_file',
+        description='Path to the xacro file'
+    )
+
+    description = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('description'),
+                'launch',
+                'description.launch.py'
+            ])
+        ),
+        launch_arguments={
+            'xacro_file': LaunchConfiguration('xacro_file')
+        }.items()
+    )
+
+    localization = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('localization'),
+                'launch',
+                'localization.launch.py'
+            ])
+        )
+    )
+
+    planning = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('planning'),
+                'launch',
+                'planning.launch.py'
+            ])
+        )
+    )
+
+    perception = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('perception'),
+                'launch',
+                'perception.launch.py'
+            ])
+        )
+    )
+
+    # ── Lane costmap node ──────────────────────────────────────────────────
+    # Projects camera lane boundaries into a persistent OccupancyGrid
+    # (/perception/road_costmap, map frame) so Nav2's global planner
+    # treats outside-lane areas as lethal obstacles.
+    # Parameters below must match the camera URDF sensor config and the
+    # global_costmap.yaml map extent / origin.
+    
+
+    # ── Goal decomposer ────────────────────────────────────────────────────
+    # goal_decomposer = Node(
+    #     package='bringup',
+    #     executable='goal_decomposer',
+    #     name='goal_decomposer',
+    #     output='screen',
+    #     parameters=[{
+    #         'use_sim_time': True,
+    #         'path_sample_dist': 2.0,
+    #         'gate_dist': 1.0,
+    #         'min_goal_dist': 0.5,
+    #         'plan_retry_delay_sec': 4.0,
+    #         'nav2_settle_sec': 1.5,
+    #     }]
+    # )
+
+#     carrot_goal = Node(
+#     package='perception',
+#     executable='carrot_goal',
+#     name='carrot_goal_node',
+#     output='screen',
+#     parameters=[{
+#         'use_sim_time': True,
+#         'carrot_dist': 2.5,
+#         'goal_tolerance': 0.8,
+#     }]
+# )
+
+    lane_bev_carrot_node = Node(
+        package='perception',
+        executable='lane_bev_carrot',
+        name='lane_bev_carrot',
+        output='screen',
+        parameters=[{
+            'use_sim_time':          True,
+            'carrot_dist_m':         4.8,
+            'goal_tolerance':        0.8,
+            'publish_rate':          2.0,
+            'camera_hfov':           1.047,
+            'image_width':           640,
+            'image_height':          480,
+            'min_proj_m':            0.3,
+            'max_proj_m':            6.0,
+            'n_bev_samples':         50,
+            'fit_cache_sec':         1.0,
+            'no_carrot_stop_streak': 3,
+            'safe_cost_max': 50,
+            'safety_radius':         0.6,  # NEW — footprint half-width + margin
+            'max_carrot_dist_m': 6.0,
+        }]
+    )
+
+   
+
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        parameters=[{'use_sim_time': True}],
+        arguments=['-d', PathJoinSubstitution([
+            FindPackageShare('bringup'),
+            'config',
+            'bringup.rviz'
+        ])],
+        output='screen'
+    )
+
+    return LaunchDescription([
+        declare_xacro_file_arg,
+        description,
+        localization,
+        planning,
+        perception,
+        # goal_decomposer,
+        # carrot_goal,
+        lane_bev_carrot_node,   
+        rviz_node,
+    ])
+
+
+================================================
+FILE: launch/bringup_real.launch.py
+================================================
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.substitutions import FindPackageShare
+from launch.substitutions import PathJoinSubstitution
+from ament_index_python.packages import get_package_share_directory
+import os
+
+def generate_launch_description():
+    pkg_desc = get_package_share_directory('description')
+    xacro_file = os.path.join(pkg_desc, 'urdf', 'robot_real.urdf.xacro')
+    
+    hardware = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('hardware'),
+                'launch',
+                'hardware.launch.py'
+            ])
+        )
+    )
+
+    base = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(             
+            PathJoinSubstitution([
+                FindPackageShare('bringup'),
+                'launch',
+                'bringup_base.launch.py'
+            ])
+        ),
+        launch_arguments={
+            'xacro_file': xacro_file
+        }.items()
+    )
+
+    return LaunchDescription([
+        hardware,
+        base
+    ])
+
+
+================================================
+FILE: launch/bringup_sim.launch.py
+================================================
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch_ros.substitutions import FindPackageShare
+from launch.substitutions import PathJoinSubstitution
+from ament_index_python.packages import get_package_share_directory
+import os
+from launch_ros.actions import Node
+
+def generate_launch_description():
+    pkg_desc = get_package_share_directory('description')
+    xacro_file = os.path.join(pkg_desc, 'urdf', 'robot.urdf.xacro')
+
+    simulation = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('simulation'),
+                'launch',
+                'simulation.launch.py'
+            ])
+        )
+    )
+
+    base = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(              
+            PathJoinSubstitution([
+                FindPackageShare('bringup'),
+                'launch',
+                'bringup_base.launch.py'
+            ])
+        ),
+        launch_arguments={
+            'xacro_file': xacro_file
+        }.items()
+    )
+    
+    return LaunchDescription([
+        simulation,
+        base
+    ])
+
+
+================================================
+FILE: resource/bringup
+================================================
+[Empty file]
+
+
+================================================
+FILE: test/test_copyright.py
+================================================
+# Copyright 2015 Open Source Robotics Foundation, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from ament_copyright.main import main
+import pytest
+
+
+# Remove the `skip` decorator once the source file(s) have a copyright header
+@pytest.mark.skip(reason='No copyright header has been placed in the generated source file.')
+@pytest.mark.copyright
+@pytest.mark.linter
+def test_copyright():
+    rc = main(argv=['.', 'test'])
+    assert rc == 0, 'Found errors'
+
+
+
+================================================
+FILE: test/test_flake8.py
+================================================
+# Copyright 2017 Open Source Robotics Foundation, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from ament_flake8.main import main_with_errors
+import pytest
+
+
+@pytest.mark.flake8
+@pytest.mark.linter
+def test_flake8():
+    rc, errors = main_with_errors(argv=[])
+    assert rc == 0, \
+        'Found %d code style errors / warnings:\n' % len(errors) + \
+        '\n'.join(errors)
+
+
+
+================================================
+FILE: test/test_pep257.py
+================================================
+# Copyright 2015 Open Source Robotics Foundation, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from ament_pep257.main import main
+import pytest
+
+
+@pytest.mark.linter
+@pytest.mark.pep257
+def test_pep257():
+    rc = main(argv=['.', 'test'])
+    assert rc == 0, 'Found code style errors / warnings'
+
+

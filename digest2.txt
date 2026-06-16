@@ -1,0 +1,841 @@
+Directory structure:
+└── description/
+    ├── package.xml
+    ├── setup.cfg
+    ├── setup.py
+    ├── config/
+    │   └── controllers.yaml
+    ├── description/
+    │   └── __init__.py
+    ├── launch/
+    │   └── description.launch.py
+    ├── resource/
+    │   └── description
+    ├── test/
+    │   ├── test_copyright.py
+    │   ├── test_flake8.py
+    │   └── test_pep257.py
+    └── urdf/
+        ├── robot.urdf.xacro
+        ├── robot_base.xacro
+        ├── robot_control.xacro
+        ├── robot_real.urdf.xacro
+        ├── robot_sensors.xacro
+        └── robot_sim.xacro
+
+================================================
+FILE: package.xml
+================================================
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>description</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="dakshpanchal08@gmail.com">soap</maintainer>
+  <license>TODO: License declaration</license>
+
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>xacro</depend>
+  <depend>tf2_ros</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+
+
+
+================================================
+FILE: setup.cfg
+================================================
+[develop]
+script_dir=$base/lib/description
+[install]
+install_scripts=$base/lib/description
+
+
+
+================================================
+FILE: setup.py
+================================================
+from setuptools import find_packages, setup
+import os
+from glob import glob
+
+package_name = 'description'
+
+setup(
+    name=package_name,
+    version='0.0.0',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'),
+            glob('launch/*.py')),
+        (os.path.join('share', package_name, 'urdf'),
+            glob('urdf/*')),
+        (os.path.join('share', package_name, 'config'),
+            glob('config/*')),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='soap',
+    maintainer_email='dakshpanchal08@gmail.com',
+    description='TODO: Package description',
+    license='TODO: License declaration',
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
+    entry_points={
+        'console_scripts': [
+        ],
+    },
+)
+
+
+
+================================================
+FILE: config/controllers.yaml
+================================================
+controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+    turret_controller:
+      type: position_controllers/JointGroupPositionController
+
+
+diff_drive_controller:
+  ros__parameters:
+    left_wheel_names: ["front_left_wheel_joint", "rear_left_wheel_joint"]
+    right_wheel_names: ["front_right_wheel_joint", "rear_right_wheel_joint"]
+    use_stamped_vel: false
+    wheel_separation: 0.3
+    wheel_radius: 0.07
+    publish_rate: 50.0
+    base_frame_id: base_link
+    odom_frame_id: odom
+    enable_odom_tf: true
+
+
+turret_controller:
+  ros__parameters:
+    joints:
+      - pan_joint
+      - tilt_base_joint
+
+
+================================================
+FILE: description/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: launch/description.launch.py
+================================================
+from launch import LaunchDescription
+from launch_ros.actions import Node
+from launch.substitutions import Command, LaunchConfiguration
+from launch_ros.parameter_descriptions import ParameterValue
+from ament_index_python.packages import get_package_share_directory
+from launch.actions import DeclareLaunchArgument
+
+def generate_launch_description():
+    
+    declare_xacro_file_arg = DeclareLaunchArgument(
+        'xacro_file',
+        description='Path to the xacro file'
+    )
+
+    return LaunchDescription([
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            parameters=[{
+                'robot_description': ParameterValue(
+                    Command(['xacro ', LaunchConfiguration('xacro_file')]),
+                    value_type=str
+                )
+            },
+            {'use_sim_time': True}],
+            output='screen'
+        )
+    ])
+
+
+================================================
+FILE: resource/description
+================================================
+[Empty file]
+
+
+================================================
+FILE: test/test_copyright.py
+================================================
+# Copyright 2015 Open Source Robotics Foundation, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from ament_copyright.main import main
+import pytest
+
+
+# Remove the `skip` decorator once the source file(s) have a copyright header
+@pytest.mark.skip(reason='No copyright header has been placed in the generated source file.')
+@pytest.mark.copyright
+@pytest.mark.linter
+def test_copyright():
+    rc = main(argv=['.', 'test'])
+    assert rc == 0, 'Found errors'
+
+
+
+================================================
+FILE: test/test_flake8.py
+================================================
+# Copyright 2017 Open Source Robotics Foundation, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from ament_flake8.main import main_with_errors
+import pytest
+
+
+@pytest.mark.flake8
+@pytest.mark.linter
+def test_flake8():
+    rc, errors = main_with_errors(argv=[])
+    assert rc == 0, \
+        'Found %d code style errors / warnings:\n' % len(errors) + \
+        '\n'.join(errors)
+
+
+
+================================================
+FILE: test/test_pep257.py
+================================================
+# Copyright 2015 Open Source Robotics Foundation, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from ament_pep257.main import main
+import pytest
+
+
+@pytest.mark.linter
+@pytest.mark.pep257
+def test_pep257():
+    rc = main(argv=['.', 'test'])
+    assert rc == 0, 'Found code style errors / warnings'
+
+
+
+================================================
+FILE: urdf/robot.urdf.xacro
+================================================
+<?xml version="1.0"?>
+<robot name="skid_steer_bot"
+       xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:include filename="robot_base.xacro"/>
+  <xacro:include filename="robot_control.xacro"/>
+  <xacro:include filename="robot_sim.xacro"/>
+  <xacro:include filename="robot_sensors.xacro"/>
+
+  <xacro:base/>
+  <xacro:control/>
+  <xacro:sim/>
+  <xacro:sensors/>
+
+</robot>
+
+
+================================================
+FILE: urdf/robot_base.xacro
+================================================
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="base">
+
+    <xacro:property name="base_length" value="0.5"/>
+    <xacro:property name="base_width" value="0.4"/>
+    <xacro:property name="base_height" value="0.2"/>
+
+    <xacro:property name="wheel_radius" value="0.075"/>
+    <xacro:property name="wheel_width" value="0.04"/>
+
+    <xacro:property name="wheel_x_offset" value="0.18"/>
+    <xacro:property name="wheel_y_offset" value="0.22"/>
+
+    <link name="base_link">
+
+      <visual>
+        <geometry>
+          <box size="${base_length} ${base_width} ${base_height}"/>
+        </geometry>
+        <origin xyz="0 0 ${base_height/2}" rpy="0 0 0"/>
+        <material name="body_color">
+          <color rgba="0.15 0.15 0.18 1"/>
+        </material>
+      </visual>
+
+      <collision>
+        <geometry>
+          <box size="${base_length} ${base_width} ${base_height}"/>
+        </geometry>
+        <origin xyz="0 0 ${base_height/2}" rpy="0 0 0"/>
+      </collision>
+
+      <inertial>
+        <mass value="10.0"/>
+        <origin xyz="0 0 ${base_height/2}"/>
+        <inertia ixx="0.2" iyy="0.2" izz="0.2" ixy="0" ixz="0" iyz="0"/>
+      </inertial>
+
+    </link>
+
+    <gazebo reference="base_link">
+      <self_collide>false</self_collide>
+    </gazebo>
+
+    <link name="imu_link">
+      <visual>
+        <geometry>
+          <box size="0.03 0.03 0.02"/>
+        </geometry>
+        <origin xyz="0 0 0"/>
+        <material name="orange">
+          <color rgba="1 0.5 0 1"/>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="imu_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="imu_link"/>
+      <origin xyz="0 0 0.15"/>
+    </joint>
+
+    <link name="gps_link">
+      <visual>
+        <geometry>
+          <box size="0.03 0.03 0.02"/>
+        </geometry>
+        <origin xyz="0 0 0"/>
+        <material name="white">
+          <color rgba="1 1 1 1"/>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="gps_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="gps_link"/>
+      <origin xyz="0 0 0.2"/>
+    </joint>
+
+    <link name="lidar_link">
+
+      <visual>
+        <geometry>
+          <cylinder radius="0.04" length="0.05"/>
+        </geometry>
+        <origin xyz="0 0 0"/>
+        <material name="gray">
+          <color rgba="0.6 0.6 0.6 1.0"/>
+        </material>
+      </visual>
+
+      <collision>
+        <geometry>
+          <cylinder radius="0.04" length="0.05"/>
+        </geometry>
+        <origin xyz="0 0 0"/>
+      </collision>
+
+    </link>
+
+    <joint name="lidar_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="lidar_link"/>
+      <origin xyz="0.22 0 0.22"/>
+    </joint>
+    <!-- ================= PAN LINK ================= -->
+<link name="pan_link">
+  <visual>
+    <geometry>
+      <cylinder radius="0.05" length="0.02"/>
+    </geometry>
+    <material name="red">
+      <color rgba="1 0 0 1"/>
+    </material>
+  </visual>
+
+  <collision>
+    <geometry>
+      <cylinder radius="0.05" length="0.02"/>
+    </geometry>
+  </collision>
+
+  <inertial>
+    <mass value="0.5"/>
+    <origin xyz="0 0 0"/>
+    <inertia ixx="0.01" iyy="0.01" izz="0.01"
+             ixy="0" ixz="0" iyz="0"/>
+  </inertial>
+</link>
+
+<joint name="pan_joint" type="revolute">
+  <parent link="base_link"/>
+  <child link="pan_link"/>
+  <origin xyz="0.12 0 0.21"/>
+  <axis xyz="0 0 1"/>
+  <limit lower="-3.14" upper="3.14" effort="5" velocity="1"/>
+  <dynamics damping="0.1" friction="0.1"/>
+</joint>
+
+<!-- ================= TILT LINK ================= -->
+<link name="tilt_link">
+  <visual>
+    <geometry>
+      <box size="0.04 0.04 0.02"/>
+    </geometry>
+    <material name="black">
+      <color rgba="0.1 0.1 0.1 1"/>
+    </material>
+  </visual>
+
+  <collision>
+    <geometry>
+      <box size="0.04 0.04 0.02"/>
+    </geometry>
+  </collision>
+
+  <inertial>
+    <mass value="0.3"/>
+    <origin xyz="0 0 0"/>
+    <inertia ixx="0.005" iyy="0.005" izz="0.005"
+             ixy="0" ixz="0" iyz="0"/>
+  </inertial>
+</link>
+
+<joint name="tilt_base_joint" type="revolute">
+  <parent link="pan_link"/>
+  <child link="tilt_link"/>
+  <origin xyz="0 0 0.05"/>
+  <axis xyz="0 1 0"/>
+  <limit lower="-1.57" upper="1.57" effort="5" velocity="1"/>
+  <dynamics damping="0.1" friction="0.1"/>
+</joint>
+
+<!-- ================= TURRET CAMERA ================= -->
+<link name="turret_camera_link">
+  <visual>
+    <geometry>
+      <box size="0.05 0.05 0.05"/>
+    </geometry>
+    <material name="Red">
+      <color rgba="1 0 0 1"/>
+    </material>
+  </visual>
+
+  <collision>
+    <geometry>
+      <box size="0.05 0.05 0.05"/>
+    </geometry>
+  </collision>
+
+  <inertial>
+    <mass value="0.3"/>
+    <origin xyz="0 0 0"/>
+    <inertia ixx="0.005" iyy="0.005" izz="0.005"
+             ixy="0" ixz="0" iyz="0"/>
+  </inertial>
+</link>
+<joint name="turret_camera_joint" type="fixed">
+  <parent link="tilt_link"/>
+  <child link="turret_camera_link"/>
+  <origin xyz="0 0 0.03"/>
+</joint>
+
+
+<!-- ================= LANE CAMERA ================= -->
+<link name="camera_link">
+  <visual>
+    <geometry>
+      <box size="0.05 0.05 0.05"/>
+    </geometry>
+    <material name="blue">
+      <color rgba="0 0 1 1"/>
+    </material>
+  </visual>
+
+  <collision>
+    <geometry>
+      <box size="0.05 0.05 0.05"/>
+    </geometry>
+  </collision>
+
+  <inertial>
+    <mass value="0.3"/>
+    <origin xyz="0 0 0"/>
+    <inertia ixx="0.005" iyy="0.005" izz="0.005"
+             ixy="0" ixz="0" iyz="0"/>
+  </inertial>
+</link>
+
+<joint name="camera_joint" type="fixed">
+  <parent link="base_link"/>
+  <child link="camera_link"/>
+  <origin xyz="0.15 0 1" rpy="0 0.25 0"/> <!-- chcanged camera and turret positions-->
+</joint>
+
+
+    <xacro:macro name="wheel" params="name x y">
+
+      <link name="${name}_link">
+
+        <visual>
+          <origin rpy="1.5708 0 0"/>
+          <geometry>
+            <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+          </geometry>
+          <material name="black">
+            <color rgba="0.05 0.05 0.05 1"/>
+          </material>
+        </visual>
+
+        <collision>
+          <origin rpy="1.5708 0 0"/>
+          <geometry>
+            <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+          </geometry>
+        </collision>
+
+        <inertial>
+          <mass value="1.0"/>
+          <origin xyz="0 0 0"/>
+          <inertia ixx="0.01" iyy="0.01" izz="0.005" ixy="0" ixz="0" iyz="0"/>
+        </inertial>
+
+      </link>
+
+      <joint name="${name}_joint" type="continuous">
+        <parent link="base_link"/>
+        <child link="${name}_link"/>
+        <origin xyz="${x} ${y} ${wheel_radius}"/>
+        <axis xyz="0 1 0"/>
+      </joint>
+
+    </xacro:macro>
+
+    <xacro:wheel name="front_left_wheel"
+                 x="${wheel_x_offset}"
+                 y="${wheel_y_offset}"/>
+
+    <xacro:wheel name="rear_left_wheel"
+                 x="-${wheel_x_offset}"
+                 y="${wheel_y_offset}"/>
+
+    <xacro:wheel name="front_right_wheel"
+                 x="${wheel_x_offset}"
+                 y="-${wheel_y_offset}"/>
+
+    <xacro:wheel name="rear_right_wheel"
+                 x="-${wheel_x_offset}"
+                 y="-${wheel_y_offset}"/>
+
+  </xacro:macro>
+
+</robot>
+
+
+================================================
+FILE: urdf/robot_control.xacro
+================================================
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:macro name="control">
+  <ros2_control name="SkidSteerSystem" type="system">
+  <hardware>
+    <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+  </hardware>
+
+  <!-- Wheels -->
+  <joint name="front_left_wheel_joint">
+    <command_interface name="velocity"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="rear_left_wheel_joint">
+    <command_interface name="velocity"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="front_right_wheel_joint">
+    <command_interface name="velocity"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="rear_right_wheel_joint">
+    <command_interface name="velocity"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <!-- Turret PAN -->
+  <joint name="pan_joint">
+    <command_interface name="position"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <!-- Turret TILT -->
+  <joint name="tilt_base_joint">
+    <command_interface name="position"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+</ros2_control>
+
+</xacro:macro>
+
+</robot>
+
+
+================================================
+FILE: urdf/robot_real.urdf.xacro
+================================================
+<?xml version="1.0"?>
+<robot name="mercury" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ================= BASE ================= -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <box size="0.4 0.3 0.1"/>
+      </geometry>
+      <origin xyz="0 0 0.05"/>
+    </visual>
+  </link>
+
+  <!-- ================= LIDAR ================= -->
+  <link name="laser_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.05" radius="0.05"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_link"/>
+    <origin xyz="0.2 0 0.15" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================= REALSENSE CAMERA BODY ================= -->
+  <link name="camera_link"/>
+
+  <joint name="camera_mount_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <!-- Adjust these values to your real mounting -->
+    <origin xyz="0.15 0 0.12" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================= IMU FRAME ================= -->
+  <link name="camera_imu_frame"/>
+
+  <joint name="camera_imu_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_imu_frame"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================= IMU OPTICAL FRAME ================= -->
+  <!-- Optical frame rotation: X right, Y down, Z forward -->
+  <link name="camera_imu_optical_frame"/>
+
+  <joint name="camera_imu_optical_joint" type="fixed">
+    <parent link="camera_imu_frame"/>
+    <child link="camera_imu_optical_frame"/>
+    <!-- Convert from ROS frame to optical frame -->
+    <origin xyz="0 0 0" rpy="-1.5708 0 -1.5708"/>
+  </joint>
+
+</robot>
+
+
+================================================
+FILE: urdf/robot_sensors.xacro
+================================================
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="sensors">
+
+    <gazebo reference="imu_link">
+      <sensor name="imu_sensor" type="imu">
+        <always_on>true</always_on>
+        <update_rate>100</update_rate>
+        <topic>/imu</topic>
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="gps_link">
+      <sensor name="gps_sensor" type="navsat">
+        <always_on>true</always_on>
+        <update_rate>5</update_rate>
+        <topic>/gps</topic>
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="lidar_link">
+      <sensor name="lidar_sensor" type="gpu_lidar">
+        <always_on>true</always_on>
+        <update_rate>10</update_rate>
+        <topic>/scan</topic>
+        <visualize>true</visualize>
+        <gz_frame_id>lidar_link</gz_frame_id>
+        <lidar>
+          <scan>
+            <horizontal>
+              <samples>360</samples>
+              <resolution>1</resolution>
+              <min_angle>-3.14159</min_angle>
+              <max_angle>3.14159</max_angle>
+            </horizontal>
+          </scan>
+
+          <range>
+            <min>0.1</min>
+            <max>10.0</max>
+            <resolution>0.01</resolution>
+          </range>
+        </lidar>
+
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="camera_link">
+      <sensor name="camera_sensor" type="camera">
+        <always_on>true</always_on>
+        <update_rate>30</update_rate>
+        <topic>/camera/image_raw</topic>
+        <camera>
+          <horizontal_fov>1.047</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>100</far>
+          </clip>
+        </camera>
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="turret_camera_link">
+  <sensor name="turret_camera_sensor" type="camera">
+    <always_on>true</always_on>
+    <update_rate>30</update_rate>
+    <topic>/turret_camera/image_raw</topic>
+    <camera>
+      <horizontal_fov>1.047</horizontal_fov>
+      <image>
+        <width>640</width>
+        <height>480</height>
+        <format>R8G8B8</format>
+      </image>
+      <clip>
+        <near>0.1</near>
+        <far>100</far>
+      </clip>
+    </camera>
+  </sensor>
+</gazebo>
+
+  </xacro:macro>
+
+</robot>
+
+
+================================================
+FILE: urdf/robot_sim.xacro
+================================================
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="sim">
+
+    <gazebo>
+      <plugin filename="libgz_ros2_control-system.so"
+              name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+
+        <parameters>$(find description)/config/controllers.yaml</parameters>
+
+      </plugin>
+    </gazebo>
+
+  </xacro:macro>
+
+</robot>
+
